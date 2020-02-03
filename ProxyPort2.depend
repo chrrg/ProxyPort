@@ -1,0 +1,31 @@
+# depslib dependency file v1.0
+1580645788 source:d:\ÎÄµµ\codeblock\proxyport2\main.cpp
+	<iostream>
+	<string>
+	<winsock2.h>
+	<stdio.h>
+	<windows.h>
+	<time.h>
+	<vector>
+	<regex>
+	<fstream>
+	"chconf.h"
+
+1580648641 d:\ÎÄµµ\codeblock\proxyport2\chconf.h
+	<string>
+	<vector>
+	<string>
+	<fstream>
+
+1580564928 d:\ÎÄµµ\codeblock\proxyport2\var_dump.hpp
+	<cstddef>
+	<iterator>
+	<memory>
+	<ostream>
+	<set>
+	<tuple>
+	<type_traits>
+	<unordered_set>
+	<utility>
+	<valarray>
+
