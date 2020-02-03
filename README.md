@@ -8,9 +8,9 @@ C++
 Windows  
 
 # 文件结构
-/bin/      Win32已编译版本  
-/main.cpp  主源码  
-/chconf.h  封装配置文件解析类  
+/bin/       Win32已编译版本  
+/main.cpp   主源码  
+/chconf.h   封装配置文件解析类  
 
 # 原理
 基于Socket协议
@@ -25,14 +25,14 @@ windows下无需修改源码，修改配置文件即可
 运行主程序即可  
 
 # 配置文件
-portProxy.conf 主配置文件  
-portType.conf  匹配数据文件  
+portProxy.conf  主配置文件  
+portType.conf   匹配数据文件  
 
 # 多线程
 创建多线程常驻内存。接收到消息分配一个线程立即响应请求。  
 
 # 性能
-高性能、高并发，占用内存低，占用CPU低。  
+占用内存低，占用CPU低，运行稳定。  
 
 # 自动获取端口类型
 被动模式：  
