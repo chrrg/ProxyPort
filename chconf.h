@@ -114,20 +114,19 @@ public:
         //string text1;
         //string text2;
         CHConfigType conf;
-        for(;row<k;row++){//开始处理
+        for(row=0;row<k;row++){//开始处理
             string line;
             line=str[row];
             int s=line.size();
             bool is_start=false;
             int lineType=0;
-            for(;column<s;column++){//开始处理
+            for(column=0;column<s;column++){//开始处理
                 char c=line[column];
                 if(!is_start){
                     if(isspace(c))continue;//空白字符跳过
                     if(c==';')break;//这一行是注释，跳过这一整行
                     is_start=true;
                     if(c!='['){
-
                         if(!is_recv){
                             print_stack("格式错误！缺少左中括号。");
                             return;
@@ -181,6 +180,6 @@ private:
     int column=0;
     void print_stack(string text){
         //cout<<row<<":"<<column<<" "<<text<<endl;
-        printf("%d:%d %s\n",row,column,text.c_str());
+        printf("%d:%d %s\n",row+1,column+1,text.c_str());
     }
 };

@@ -37,6 +37,8 @@
 		</Compiler>
 		<Unit filename="chconf.h" />
 		<Unit filename="main.cpp" />
+		<Unit filename="md5.cpp" />
+		<Unit filename="md5.h" />
 		<Extensions>
 			<code_completion />
 			<envvars />

@@ -7,11 +7,15 @@
 #include <vector>
 #include <regex>
 #include <fstream>
+
+
 //#pragma comment (lib,"ws2_32")
 #define MAXBUFSIZE 8192
 using namespace std;
 #include "chconf.h"
+#include "md5.h"
 typedef struct childDataType{
+    HANDLE handle;
     int index;
 	SOCKET* client=NULL;
     bool ready=false;//就绪状态
@@ -23,17 +27,40 @@ typedef struct proxyRuleType{
 	vector<regex> reg;
 }ProxyRule;
 vector<ProxyRule> proxyRule;//转发规则
+vector<string> allowIP;//转发规则
 typedef struct proxyPort_Config{
     vector<string> sendStr;
     int port=0;
     int debug=0;
     int initThread=0;
     int timeout;
+    string forwardHost="";
+    int forwardPort=0;
+    bool is_Auth;//是否需要授权
+    string Auth_pwd;//授权密码
+    string unAuthHost;//未授权转发主机
+    int unAuthPort;//未授权转发端口
 }proxyPortConfig;
 proxyPortConfig config;
-
+fstream access_log;
 void delay(int ms){HANDLE hEvent = CreateEvent(NULL,FALSE,FALSE,NULL);WaitForSingleObject(hEvent,ms);}//延时函数
-
+string getTime(){
+	time_t t;
+    time(&t);
+    char p[64];
+    strftime(p, sizeof(p), "%Y-%m-%d %H:%M:%S", localtime(&t));
+	return p;
+}
+void wlog(string str){
+    access_log<<getTime()<<"|"<<str<<endl;
+}
+bool isLogin(string ip){
+    int allowIPSize=allowIP.size();
+    for(int i=0;i<allowIPSize;i++)
+        if(allowIP[i]==ip)//如果允许列表中有当前连接的ip
+            return true;
+    return false;
+}
 string HexToAscii(unsigned char pHex[], int nLen){
     string str;
     unsigned char Nibble[2];
@@ -53,11 +80,28 @@ string HexToAscii(unsigned char pHex[], int nLen){
     }
     return str;
 }
+std::vector<std::string> split(const std::string& s, char delimiter){
+   std::vector<std::string> tokens;
+   std::string token;
+   std::istringstream tokenStream(s);
+   while(std::getline(tokenStream, token, delimiter))tokens.push_back(token);
+   return tokens;
+}
 DWORD WINAPI Child(LPVOID lpParamter){
 	ChildType* task = (ChildType *)lpParamter;
 	if(config.debug>2)printf("线程%d已启动！\n",task->index);
+	//wlog("线程"+to_string(task->index)+"已启动！");
 	while(1){
 		if(task->client!=NULL){
+		    struct sockaddr_in client_sockaddr;
+		    string log_tmp;
+            int len=sizeof(client_sockaddr);
+            string client_addr;
+            if(!getpeername(*task->client, (struct sockaddr *)&client_sockaddr, &len)){
+                client_addr=inet_ntoa(client_sockaddr.sin_addr);
+                client_addr+=":";
+                client_addr+=to_string(ntohs(client_sockaddr.sin_port));
+            }
             task->ready=false;
             if(config.debug>1)printf("线程%d收到！\n",task->index);
             SOCKET ClientSock=*task->client;
@@ -65,79 +109,157 @@ DWORD WINAPI Child(LPVOID lpParamter){
             setsockopt(ClientSock,SOL_SOCKET,SO_RCVTIMEO,(char*)&timeout,sizeof(timeout));
             char RecvBuf[MAXBUFSIZE];
             memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
-            int nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);
-            if(config.debug>10)printf("recv返回长度：%d，内容：%s|||\n",nRecv,HexToAscii((unsigned char*)RecvBuf,nRecv).c_str());
-
-            int sendStrSize=config.sendStr.size();
-            if(nRecv <= 0)
-                for(int i=0;i<sendStrSize;i++){
-                    if (nRecv <= 0){
-                        int err = WSAGetLastError();
-                        if (err == EWOULDBLOCK || err == WSAETIMEDOUT){
-                            send(ClientSock, config.sendStr[i].c_str(), config.sendStr[i].size(), 0);
-                            if(config.debug>2)printf("类型尝试发送：%s\n",config.sendStr[i].c_str());
-                            memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
-                            nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);//主动发送继续接收
-                        }else{
-                            if(config.debug>2)printf("客户端断开！\n");
-                            closesocket(ClientSock);
-                            task->client=NULL;
-                            task->ready=true;
-                            continue;
-                        }
-                    }else break;
-                }
-            if (nRecv <= 0){
-                if(config.debug>2)printf("客户端类型未识别！已断开！\n");
-                closesocket(ClientSock);
-                task->client=NULL;
-                task->ready=true;
-                continue;
-            }
-
-            if(config.debug>2)printf("收到：%s\n",RecvBuf);
-            int nn=proxyRule.size();
             int connect_port=0;
             string connect_host;
-            for(int i=0;i<nn;i++){
-                int nn2=proxyRule[i].reg.size();
-                for(int j=0;j<nn2;j++){
-                    if(regex_match(RecvBuf,proxyRule[i].reg[j])){
-                        connect_port=proxyRule[i].port;
-                        connect_host=proxyRule[i].host;
-                        break;
+            bool isNeedRecv=false;
+            int nRecv=0;
+            SOCKET ServerSock;
+            struct hostent*pt=NULL;
+            if(config.forwardPort==0){//无条件转发端口
+                bool verify=isLogin(inet_ntoa(client_sockaddr.sin_addr));
+                nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);
+                if(config.debug>10)printf("recv返回长度：%d，内容：%s|||\n",nRecv,HexToAscii((unsigned char*)RecvBuf,nRecv).c_str());
+                if(config.is_Auth&&nRecv > 0&&!verify){//需要授权，且未登录则需要判断是否是登录
+                    string loginStr;
+                    MD5 md5;
+                    loginStr=RecvBuf;
+                    string ipHash;
+                    md5.update("ProxyPort2_IP_"+client_addr);
+                    ipHash=md5.toString();
+                    //printf("loginStr:%s\n",loginStr.c_str());
+                    if(loginStr=="ProxyPort2-Login")
+                        send(ClientSock, ipHash.c_str(), ipHash.size(), 0);
+                    else goto disconnect;
+                    nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);
+                    if(nRecv<0)goto disconnect;//接收失败或空则断开连接
+                    loginStr=RecvBuf;
+                    if(loginStr.find("ProxyPort2-Login ")==0){//ip登录密码验证
+                        vector<string> LoginArr;
+                        LoginArr=split(loginStr,' ');
+                        if(LoginArr.size()==4){
+                            //LoginArr[3]
+                            string pwd;
+                            pwd="ProxyPort2_";
+                            pwd+=ipHash;
+                            pwd+="|";
+                            pwd+=config.Auth_pwd;
+                            md5.reset();
+                            md5.update(pwd);
+                            //printf("Debug2:%s %s %s|\n",pwd.c_str(),md5.toString().c_str(),loginStr.c_str());
+                            if(md5.toString()==LoginArr[3]){
+                                log_tmp="登录成功来自";
+                                log_tmp+=client_addr;
+                                wlog(log_tmp);
+                                printf("登录成功来自%s\n",client_addr.c_str());
+                                allowIP.push_back(inet_ntoa(client_sockaddr.sin_addr));
+                                send(ClientSock, "1", 1, 0);
+                            }else{
+                                //printf("1:%d\n2:%d\n",pwd.size(),LoginArr[3].size());
+
+                                log_tmp="登录失败来自";
+                                log_tmp+=client_addr;
+                                wlog(log_tmp);
+                                printf("登录失败来自%s\n",client_addr.c_str());
+                                send(ClientSock, "0", 1, 0);
+                            }
+                        }
+                        goto disconnect;
                     }
                 }
-                if(connect_port!=0)break;
+                if(config.is_Auth){//如果已经授权
+                    //且未登录，则转自未授权主机端口，不验证也不test
+                    if(!verify){
+                        if(config.unAuthHost==""){//断开连接
+                            goto disconnect;
+                        }else{//转发连接
+                            connect_host=config.unAuthHost;
+                            connect_port=config.unAuthPort;
+                            goto transport;
+                        }
+                    }
+                }
+                if(nRecv <= 0){
+                    isNeedRecv=true;
+                    int sendStrSize=config.sendStr.size();
+                    for(int i=0;i<sendStrSize;i++){
+                        if (nRecv <= 0){
+                            int err = WSAGetLastError();
+                            if (err == EWOULDBLOCK || err == WSAETIMEDOUT){
+                                send(ClientSock, config.sendStr[i].c_str(), config.sendStr[i].size(), 0);
+                                if(config.debug>2)printf("类型尝试发送：%s\n",config.sendStr[i].c_str());
+                                memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
+                                nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);//主动发送继续接收
+                            }else{
+                                if(config.debug>2)printf("客户端断开！\n");
+                                goto disconnect;
+                            }
+                        }else break;
+                    }
+                }
+                if (nRecv <= 0){
+                    if(config.debug>2)printf("客户端类型未识别！已断开！\n");
+                    log_tmp=client_addr;
+                    log_tmp+="未识别的客户端类型";
+                    wlog(log_tmp);
+                    goto disconnect;
+                }
+
+                if(config.debug>2)printf("收到：%s\n",RecvBuf);
+                int nn=proxyRule.size();
+
+
+                for(int i=0;i<nn;i++){
+                    int nn2=proxyRule[i].reg.size();
+                    for(int j=0;j<nn2;j++){
+                        if(regex_match(RecvBuf,proxyRule[i].reg[j])){
+                            connect_port=proxyRule[i].port;
+                            connect_host=proxyRule[i].host;
+                            break;
+                        }
+                    }
+                    if(connect_port!=0)break;
+                }
+                if(connect_port==0){
+                    if(config.debug>2)printf("未知类型，收到：%s|\n",RecvBuf);
+                    goto disconnect;
+                }
+            }else{
+                if(config.forwardHost=="")connect_host="127.0.0.1";else connect_host=config.forwardHost;
+                connect_port=config.forwardPort;
             }
-            if(connect_port==0){
-                if(config.debug>2)printf("未知类型，收到：%s|\n",RecvBuf);
-                closesocket(ClientSock);
-                task->client=NULL;
-                task->ready=true;
-                continue;
-            }
+transport:
             if(config.debug>2)printf("转发成功：%s:%d\n",connect_host.c_str(),connect_port);
-			SOCKET s = socket(AF_INET,SOCK_STREAM,0);
-			if(s == INVALID_SOCKET){
+            log_tmp=client_addr;
+            log_tmp+="=>";
+            log_tmp+=connect_host;
+            log_tmp+=":";
+            log_tmp+=to_string(connect_port);
+            wlog(log_tmp);
+			ServerSock = socket(AF_INET,SOCK_STREAM,0);
+			if(ServerSock == INVALID_SOCKET){
 				if(config.debug>2)printf("socket链接错误！%d\n",WSAGetLastError());
 				break;//客户端断开
 			}
-			struct hostent *pt = gethostbyname(connect_host.c_str());//解析域名IP
+ 			pt = gethostbyname(connect_host.c_str());//解析域名IP
 			if(!pt)break;//客户端断开
 			struct sockaddr_in sockaddr;
 			sockaddr.sin_family = AF_INET;//PF_INET;
 			memcpy(&sockaddr.sin_addr, pt->h_addr, 4);
 			sockaddr.sin_port = htons(connect_port);//设置要连接的IP和端口
 			int ret;
-			ret=connect(s, (struct sockaddr * ) & sockaddr, sizeof(struct sockaddr_in));
+			ret=connect(ServerSock, (struct sockaddr * ) & sockaddr, sizeof(struct sockaddr_in));
 			if(ret == SOCKET_ERROR)break;//客户端断开
-			if(s <= 0){
+			if(ServerSock <= 0){
 				if(config.debug>2)printf("socket connect失败！%d\n",WSAGetLastError());
 				break;//客户端断开
 			}
-			SOCKET ServerSock=s;
-            send(ServerSock,RecvBuf,nRecv,0);
+			if(isNeedRecv){
+                char RecvBuf2[MAXBUFSIZE];
+                recv(ServerSock,RecvBuf2, sizeof(RecvBuf2), 0);
+			}
+            if(config.forwardPort==0){
+                send(ServerSock,RecvBuf,nRecv,0);
+            }
             //printf("转发第一次数据：%s\n",RecvBuf);
             memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
 			fd_set Fd_Read;
@@ -169,13 +291,20 @@ DWORD WINAPI Child(LPVOID lpParamter){
 				}
 			}
 			closesocket(ServerSock);
+disconnect:
+            log_tmp=client_addr;
+            log_tmp+="连接断开！";
+            wlog(log_tmp);
+            if(config.debug>1)printf("客户端断开，线程已就绪\n");
 			closesocket(ClientSock);
+			delete task->client;
 			task->client=NULL;
 			task->ready=true;
-			if(config.debug>1)printf("客户端断开，线程已就绪\n");
+			SuspendThread(task->handle);
 		}
-		delay(5);//降低cpu
+		//delay(5);//降低cpu
 	}
+	CloseHandle(task->handle);
     return 0L;
 }
 DWORD WINAPI Main(LPVOID lpParamter){
@@ -185,7 +314,10 @@ int createNewTaskThread(ChildType* t){
 	t->index=taskThreadList.size();
 	taskThreadList.push_back(t);
 	HANDLE hThread = CreateThread(NULL, 0, Child, t, 0, NULL);//启动子线程
-    CloseHandle(hThread);
+	t->handle=hThread;
+
+    //CloseHandle(hThread);
+
 	return 1;
 }
 void sendTask(SOCKET* client){
@@ -196,6 +328,7 @@ void sendTask(SOCKET* client){
 		if(taskThreadList[i]->ready){
 			taskThreadList[i]->ready=false;
 			taskThreadList[i]->client=client;
+			ResumeThread(taskThreadList[i]->handle);
 			return;
 		}
     }
@@ -218,13 +351,27 @@ string GetExePath(){
     string path = szFilePath;
     return path;
 }
+
 bool init_config(){
 
     //ch_conf conf("D:\\文档\\codeblock\\ProxyPort2\\bin\\Debug\\portProxy.conf");
     //ch_conf conf2("D:\\文档\\codeblock\\ProxyPort2\\bin\\Debug\\portType.conf");
     string path=GetExePath();
+    access_log.open(path+"\\access.log", ios::app);
+    if(access_log.fail()){
+        printf("Warn: 日志文件打开失败！\n");
+        return false;
+    }
+    wlog("ProxyPort初始化中...");
     ch_conf conf(path+"\\portProxy.conf");
     ch_conf conf2(path+"\\portType.conf");
+
+    //access_log<<"123123\r\n";
+
+    //access_log<<"gg66\n";//<<endl;
+    //access_log.flush();
+    //access_log<<;
+
     if(!conf.verifyKeyValue("general")){
         printf("Error: 配置文件加载失败！Key-Value格式不正确！\n");
         return false;
@@ -243,6 +390,25 @@ bool init_config(){
     }
     config.port=atoi(confstr.c_str());//设置端口号
     /////////////////////////////////////////////////////////////
+    /////////////////////////////////////////////////////////////
+    //设置无条件转发端口
+    confstr=conf.getKeyValue("general","forwardPort");
+    if(confstr!=""){
+        if(!is_numeric(confstr)){
+            printf("Error: %s无条件转发端口号必须是数字！",confstr.c_str());
+            return false;
+        }
+        if(atoi(confstr.c_str())<1||atoi(confstr.c_str())>65535){
+            printf("Error: %s无条件转发端口号只能在1到65535之间！",confstr.c_str());
+            return false;
+        }
+        config.forwardPort=atoi(confstr.c_str());//设置无条件转发端口号
+    }else config.forwardPort=0;
+    confstr=conf.getKeyValue("general","forwardHost");
+    if(confstr=="")
+        config.forwardHost="";
+    else
+        config.forwardHost=confstr;//设置端口号
 
     /////////////////////////////////////////////////////////////
     //设置调试
@@ -267,6 +433,7 @@ bool init_config(){
         ChildType* t=new ChildType;
         t->ready=true;
         createNewTaskThread(t);
+        SuspendThread(t->handle);
         delay(5);
     }
     /////////////////////////////////////////////////////////////
@@ -278,6 +445,19 @@ bool init_config(){
         return false;
     }
     config.timeout=atoi(confstr.c_str());
+    /////////////////////////////////////////////////////////////
+    //设置授权设置
+    confstr=conf.getKeyValue("general","authPwd");
+    if(confstr==""){
+        config.is_Auth=false;
+    }else{
+        config.is_Auth=true;
+        config.Auth_pwd=confstr;
+        config.unAuthHost=conf.getKeyValue("general","unAuthHost");
+        config.unAuthPort=atoi(conf.getKeyValue("general","unAuthPort").c_str());
+    }
+
+
     /////////////////////////////////////////////////////////////
     /////////////////////////////////////////////////////////////
     //设置测试文本
@@ -340,15 +520,18 @@ bool init_config(){
         proxyRule.push_back(rule);
     }
     /////////////////////////////////////////////////////////////
+    wlog("ProxyPort初始化成功！");
     return true;
 }
-void init_socket(){
+void init_WSA(){
     WSADATA wsaData;
     if(WSAStartup(MAKEWORD(2,2),&wsaData)!=0){
 		printf("Error: socket初始化失败！\n");
 		return;
 	};//初始化
-	SOCKET  s = socket(AF_INET, SOCK_STREAM, 0);
+}
+void init_socket(){
+	SOCKET s = socket(AF_INET, SOCK_STREAM, 0);
 	if (s == INVALID_SOCKET){// == SOCKET_ERROR
 		printf("Error: socket执行失败！\n");
 		return;
@@ -370,20 +553,140 @@ void init_socket(){
 		return;
 	}
 	printf("启动成功！\n");
+	wlog("ProxyPort启动成功！");
     while(1){
-		SOCKET client_tmp;// = new SOCKET;
+		/*SOCKET client_tmp;// = new SOCKET;
 		client_tmp = accept(s, NULL, NULL);//等待客户端连接 阻塞
 		SOCKET *client = new SOCKET;
-		*client=client_tmp;
+		*client=client_tmp;*/
+		SOCKET *client = new SOCKET;
+		*client = accept(s, NULL, NULL);
+		struct sockaddr_in sa;
+        int len = sizeof(sa);
+        string addr;
+        if(!getpeername(*client, (struct sockaddr *)&sa, &len)){
+            addr=inet_ntoa(sa.sin_addr);
+            addr+=":";
+            addr+=to_string(ntohs(sa.sin_port));
+            addr+="接入";
+        }
+		wlog(addr);
 		sendTask(client);//分配线程任务
 		if(config.debug>1)printf("分配线程！\n");
 	}
     closesocket(s);
     WSACleanup();
 }
+BOOL WINAPI HandlerRoutine(DWORD dwCtrlType){
+    if(CTRL_CLOSE_EVENT == dwCtrlType){// 控制台将要被关闭，这里添加你的处理代码 ...
+        wlog("正常关闭！");
+    }
+    return true;
+}
+void login(string host,int port,string authPwd){
+    SOCKET ServerSock;
+    string SendStr;
+    ServerSock = socket(AF_INET,SOCK_STREAM,0);
+    if(ServerSock == INVALID_SOCKET){
+        printf("fail\n");
+        return;//客户端断开
+    }
+    struct hostent*pt=NULL;
+    pt = gethostbyname(host.c_str());//解析域名IP
+    if(!pt)return;//客户端断开
+    struct sockaddr_in sockaddr;
+    sockaddr.sin_family = AF_INET;//PF_INET;
+    memcpy(&sockaddr.sin_addr, pt->h_addr, 4);
+    sockaddr.sin_port = htons(port);//设置要连接的IP和端口
+    int ret;
+    ret=connect(ServerSock, (struct sockaddr * ) & sockaddr, sizeof(struct sockaddr_in));
+    if(ret == SOCKET_ERROR)return;//客户端断开
+    if(ServerSock <= 0){
+        return;//客户端断开
+    }
+    struct sockaddr_in listendAddr;
+    int listendAddrLen;
+    listendAddrLen = sizeof(listendAddr);
+    if(getsockname(ServerSock, (struct sockaddr *)&listendAddr, &listendAddrLen) == -1){
+        printf("getsockname error\n");
+        return;
+    }
+    //printf("listen address = %s:%d\n", , ntohs(listendAddr.sin_port));
+
+    MD5 md5;
+    send(ServerSock,"ProxyPort2-Login",strlen("ProxyPort2-Login"),0);
+    char RecvBuf[MAXBUFSIZE];
+    memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
+    int nRecv;
+    nRecv = recv(ServerSock, RecvBuf, sizeof(RecvBuf), 0);
+    if(nRecv<0){
+        printf("登录未返回数据！");
+        return;
+    }
+    if(nRecv!=32){
+        printf("已经登录成功了或协议不正确！");
+        return;
+    }
+    string ipHash=RecvBuf;
+    string pwd;
+    pwd="ProxyPort2_";
+    pwd+=ipHash;
+    pwd+="|";
+    pwd+=authPwd;
+
+    md5.update(pwd);
+    SendStr="ProxyPort2-Login ";
+    SendStr+=host+" ";
+    SendStr+=to_string(port)+" ";
+    SendStr+=md5.toString();
+    //printf("Debug1:%s %s|\n",pwd.c_str(),md5.toString().c_str());
+    send(ServerSock,SendStr.c_str(),SendStr.size(),0);
+    memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
+    nRecv = recv(ServerSock, RecvBuf, sizeof(RecvBuf), 0);
+    string result;
+    result=RecvBuf;
+    if(result=="1"){
+        printf("登录成功！欢迎登录！\n");
+    }else if(result=="0"){
+        printf("登录失败！密码错误！\n");
+    }else{
+        printf("登录失败！返回值：%s\n",result.c_str());
+    }
+}
+
 int main(int argc,char *argv[]){
+
+    init_WSA();
+	if(argc>1){
+        printf("ProxyPort: 收到启动参数...\n");
+	    string type;
+        type=argv[1];
+        if(type=="-l"){//login
+            if(argc==5){
+                string host,pwd;
+                int port;
+                host=argv[2];
+                port=stoi(argv[3]);
+                pwd=argv[4];
+                printf("ProxyPort: 登录中 %s %d...\n",host.c_str(),port);
+                login(host,port,pwd);
+                /*
+                argv[0]//-l  login
+                argv[1]//yiban.glut.edu.cn    host
+                argv[2]//80                   port
+                argv[3]//pwd                  pwd
+                */
+            }
+        }
+        printf("End\n");
+        return 0;
+	}
 	printf("ProxyPort: 启动中...\n");
+	printf("-----CH制作 2020-02-02\n");
     if(!init_config())return 1;//初始化配置文件
+    if(SetConsoleCtrlHandler(HandlerRoutine, TRUE)){
+
+    }
     init_socket();
     return 0;
 }
