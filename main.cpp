@@ -112,24 +112,27 @@ DWORD WINAPI Child(LPVOID lpParamter){
             int connect_port=0;
             string connect_host;
             bool isNeedRecv=false;
+            bool isNeedSend=false;
+            int NeedSendLength=0;
+            char NeedSendStr[MAXBUFSIZE];
+
             int nRecv=0;
             SOCKET ServerSock;
             struct hostent*pt=NULL;
-            if(config.forwardPort==0){//无条件转发端口
-                bool verify=isLogin(inet_ntoa(client_sockaddr.sin_addr));
+            if(config.forwardPort==0){//无条件转发端口如果是0 说明需要验证
+                //说明需要授权才能访问
                 nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);
                 if(config.debug>10)printf("recv返回长度：%d，内容：%s|||\n",nRecv,HexToAscii((unsigned char*)RecvBuf,nRecv).c_str());
-                if(config.is_Auth&&nRecv > 0&&!verify){//需要授权，且未登录则需要判断是否是登录
-                    string loginStr;
+                //是否需要授权 且获取到数据且未验证
+                bool verify=isLogin(inet_ntoa(client_sockaddr.sin_addr));
+                string loginStr=RecvBuf;
+                if(config.is_Auth&&nRecv > 0&&!verify&&loginStr=="ProxyPort2-Login"){//需要授权，且未登录则需要判断是否是登录
                     MD5 md5;
-                    loginStr=RecvBuf;
                     string ipHash;
                     md5.update("ProxyPort2_IP_"+client_addr);
                     ipHash=md5.toString();
                     //printf("loginStr:%s\n",loginStr.c_str());
-                    if(loginStr=="ProxyPort2-Login")
-                        send(ClientSock, ipHash.c_str(), ipHash.size(), 0);
-                    else goto disconnect;
+                    send(ClientSock, ipHash.c_str(), ipHash.size(), 0);
                     nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);
                     if(nRecv<0)goto disconnect;//接收失败或空则断开连接
                     loginStr=RecvBuf;
@@ -163,19 +166,26 @@ DWORD WINAPI Child(LPVOID lpParamter){
                                 send(ClientSock, "0", 1, 0);
                             }
                         }
-                        goto disconnect;
                     }
+                    goto disconnect;
                 }
-                if(config.is_Auth){//如果已经授权
+                if(nRecv > 0){
+                    isNeedSend=true;
+                    NeedSendLength=nRecv;
+                    memcpy(NeedSendStr,RecvBuf,sizeof(RecvBuf));
+                }
+                if(config.is_Auth&&!verify){//如果需要授权
                     //且未登录，则转自未授权主机端口，不验证也不test
-                    if(!verify){
-                        if(config.unAuthHost==""){//断开连接
-                            goto disconnect;
-                        }else{//转发连接
-                            connect_host=config.unAuthHost;
-                            connect_port=config.unAuthPort;
-                            goto transport;
-                        }
+                    if(config.unAuthPort<=0)goto disconnect;
+                    connect_host=config.unAuthHost==""?"127.0.0.1":config.unAuthHost;
+                    connect_port=config.unAuthPort;
+                    goto transport;
+                }
+                if(config.is_Auth&&nRecv > 0&&verify){
+                    //已经登录了
+                    if(loginStr=="ProxyPort2-Login"){
+                        send(ClientSock, "ProxyPort2-success", 18, 0);
+                        goto disconnect;
                     }
                 }
                 if(nRecv <= 0){
@@ -223,7 +233,7 @@ DWORD WINAPI Child(LPVOID lpParamter){
                     if(config.debug>2)printf("未知类型，收到：%s|\n",RecvBuf);
                     goto disconnect;
                 }
-            }else{
+            }else{//那就是无条件转发模式
                 if(config.forwardHost=="")connect_host="127.0.0.1";else connect_host=config.forwardHost;
                 connect_port=config.forwardPort;
             }
@@ -256,10 +266,17 @@ transport:
 			if(isNeedRecv){
                 char RecvBuf2[MAXBUFSIZE];
                 recv(ServerSock,RecvBuf2, sizeof(RecvBuf2), 0);
-			}
-            if(config.forwardPort==0){
                 send(ServerSock,RecvBuf,nRecv,0);
-            }
+                //printf("Debug: recv ok!");
+			}
+			if(isNeedSend){
+                send(ServerSock,NeedSendStr,NeedSendLength,0);
+                //printf("Debug: send ok!");
+			}
+
+            //if(config.forwardPort==0){//说明不是无条件发送
+            //
+            //}
             //printf("转发第一次数据：%s\n",RecvBuf);
             memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
 			fd_set Fd_Read;
@@ -623,11 +640,16 @@ void login(string host,int port,string authPwd){
         printf("登录未返回数据！");
         return;
     }
+    string ipHash=RecvBuf;
+    if(nRecv==18&&ipHash.find("ProxyPort2-success")==0){
+        printf("已经登录过了，不要重复登录哦！");
+        return;
+    }
     if(nRecv!=32){
         printf("已经登录成功了或协议不正确！");
         return;
     }
-    string ipHash=RecvBuf;
+
     string pwd;
     pwd="ProxyPort2_";
     pwd+=ipHash;
