@@ -1,5 +1,39 @@
 # ProxyPort
+<<<<<<< HEAD
 不同类型端口转发工具 能使Http Ftp等不同类型的端口聚合成一个端口
+=======
+端口聚合工具 能使Http RDP等不同协议的端口聚合成一个端口  
+
+--
+
+# 关键字
+端口代理 端口转发 端口聚合 端口合并  
+
+# 语言
+C++  
+
+# 运行平台
+Windows  
+
+# 已编译版本
+/bin/Release/ProxyPort2.exe  主程序 双击打开运行  
+/bin/Release/portProxy.conf  配置文件  
+/bin/Release/portType.conf   端口类型数据   
+access.log                   运行时生成的日志  
+login.bat                    登录的脚本  
+
+
+# 文件结构
+/bin/       Win32已编译版本  
+/main.cpp   主源码  
+/chconf.h   封装配置文件解析类  
+# 功能
+可以作为普通的1对1端口转发器使用，也可以配置1对多端口转发器。  
+可以解决外网端口不够的情况。  
+
+# 原理
+基于Socket协议  
+通过接收客户端的数据匹配配置文件的正则来判别应该转发到哪个端口。  
 
 # 使用场景
 对外端口不够的情况下，将SSH、HTTP、FTP等不通类型的端口合并成一个端口
