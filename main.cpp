@@ -54,12 +54,24 @@ string getTime(){
 void wlog(string str){
     access_log<<getTime()<<"|"<<str<<endl;
 }
+void logout(string ip){
+    std::vector<string>::iterator it;
+    it = find(allowIP.begin(), allowIP.end(), ip);
+    if (it != allowIP.end())allowIP.erase(it);
+}
 bool isLogin(string ip){
+    vector<string>::iterator it;
+    it=find(allowIP.begin(),allowIP.end(),ip);
+    if(it!=allowIP.end())
+        return true;
+    else
+        return false;
+    /*
     int allowIPSize=allowIP.size();
     for(int i=0;i<allowIPSize;i++)
         if(allowIP[i]==ip)//如果允许列表中有当前连接的ip
             return true;
-    return false;
+    return false;*/
 }
 string HexToAscii(unsigned char pHex[], int nLen){
     string str;
@@ -126,6 +138,10 @@ DWORD WINAPI Child(LPVOID lpParamter){
                 //是否需要授权 且获取到数据且未验证
                 bool verify=isLogin(inet_ntoa(client_sockaddr.sin_addr));
                 string loginStr=RecvBuf;
+                if(config.is_Auth&&nRecv > 0&&!verify&&loginStr.find("ProxyPort2-Logout")==0){//没登录的时候发送注销命令：
+                    send(ClientSock, "ProxyPort2-unAuth", 17, 0);
+                    goto disconnect;
+                }
                 if(config.is_Auth&&nRecv > 0&&!verify&&loginStr=="ProxyPort2-Login"){//需要授权，且未登录则需要判断是否是登录
                     MD5 md5;
                     string ipHash;
@@ -136,6 +152,8 @@ DWORD WINAPI Child(LPVOID lpParamter){
                     nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);
                     if(nRecv<0)goto disconnect;//接收失败或空则断开连接
                     loginStr=RecvBuf;
+
+                    //
                     if(loginStr.find("ProxyPort2-Login ")==0){//ip登录密码验证
                         vector<string> LoginArr;
                         LoginArr=split(loginStr,' ');
@@ -187,22 +205,32 @@ DWORD WINAPI Child(LPVOID lpParamter){
                         send(ClientSock, "ProxyPort2-success", 18, 0);
                         goto disconnect;
                     }
+                    if(loginStr=="ProxyPort2-Logout"){
+                        log_tmp="客户端主动注销来自";
+                        log_tmp+=client_addr;
+                        wlog(log_tmp);
+                        printf("注销成功来自%s\n",client_addr.c_str());
+                        logout(inet_ntoa(client_sockaddr.sin_addr));
+                        send(ClientSock, "ProxyPort2-success", 18, 0);
+                        goto disconnect;
+                    }
                 }
                 if(nRecv <= 0){
                     isNeedRecv=true;
                     int sendStrSize=config.sendStr.size();
+                    //printf("sendStrSize %d\n",sendStrSize);
                     for(int i=0;i<sendStrSize;i++){
                         if (nRecv <= 0){
-                            int err = WSAGetLastError();
-                            if (err == EWOULDBLOCK || err == WSAETIMEDOUT){
+                            //int err = WSAGetLastError();
+                            //if (err == EWOULDBLOCK || err == WSAETIMEDOUT){
                                 send(ClientSock, config.sendStr[i].c_str(), config.sendStr[i].size(), 0);
                                 if(config.debug>2)printf("类型尝试发送：%s\n",config.sendStr[i].c_str());
                                 memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
                                 nRecv = recv(ClientSock, RecvBuf, sizeof(RecvBuf), 0);//主动发送继续接收
-                            }else{
-                                if(config.debug>2)printf("客户端断开！\n");
-                                goto disconnect;
-                            }
+                            //}else{
+                            //    if(config.debug>2)printf("客户端断开！\n");
+                            //    goto disconnect;
+                            //}
                         }else break;
                     }
                 }
@@ -600,7 +628,54 @@ BOOL WINAPI HandlerRoutine(DWORD dwCtrlType){
     }
     return true;
 }
-void login(string host,int port,string authPwd){
+void logout_server(string host,int port){
+    SOCKET ServerSock;
+    string SendStr;
+    ServerSock = socket(AF_INET,SOCK_STREAM,0);
+    if(ServerSock == INVALID_SOCKET){
+        printf("fail\n");
+        return;//客户端断开
+    }
+    struct hostent*pt=NULL;
+    pt = gethostbyname(host.c_str());//解析域名IP
+    if(!pt)return;//客户端断开
+    struct sockaddr_in sockaddr;
+    sockaddr.sin_family = AF_INET;//PF_INET;
+    memcpy(&sockaddr.sin_addr, pt->h_addr, 4);
+    sockaddr.sin_port = htons(port);//设置要连接的IP和端口
+    int ret;
+    ret=connect(ServerSock, (struct sockaddr * ) & sockaddr, sizeof(struct sockaddr_in));
+    if(ret == SOCKET_ERROR)return;//客户端断开
+    if(ServerSock <= 0){
+        return;//客户端断开
+    }
+    struct sockaddr_in listendAddr;
+    int listendAddrLen;
+    listendAddrLen = sizeof(listendAddr);
+    if(getsockname(ServerSock, (struct sockaddr *)&listendAddr, &listendAddrLen) == -1){
+        printf("getsockname error\n");
+        return;
+    }
+    send(ServerSock,"ProxyPort2-Logout",strlen("ProxyPort2-Logout"),0);
+    char RecvBuf[MAXBUFSIZE];
+    memset(RecvBuf,0,sizeof(RecvBuf));//clean buffer
+    int nRecv;
+    nRecv = recv(ServerSock, RecvBuf, sizeof(RecvBuf), 0);
+    if(nRecv<0){
+        printf("注销登录未返回数据！");
+        return;
+    }
+    string result=RecvBuf;
+    if(nRecv==18&&result.find("ProxyPort2-success")==0){
+        printf("注销成功！");
+        return;
+    }else if(nRecv==17&&result.find("ProxyPort2-unAuth")==0){
+        printf("未登录无法注销登录！");
+        return;
+    }
+    printf("注销登录失败！返回值：%s\n",result.c_str());
+}
+void login_server(string host,int port,string authPwd){
     SOCKET ServerSock;
     string SendStr;
     ServerSock = socket(AF_INET,SOCK_STREAM,0);
@@ -691,14 +766,27 @@ int main(int argc,char *argv[]){
                 port=stoi(argv[3]);
                 pwd=argv[4];
                 printf("ProxyPort: 登录中 %s %d...\n",host.c_str(),port);
-                login(host,port,pwd);
+                login_server(host,port,pwd);
                 /*
-                argv[0]//-l  login
-                argv[1]//yiban.glut.edu.cn    host
-                argv[2]//80                   port
-                argv[3]//pwd                  pwd
+                argv[1]//-l  login
+                argv[2]//yiban.glut.edu.cn    host
+                argv[3]//80                   port
+                argv[4]//pwd                  pwd
                 */
             }
+        }
+        if(type=="-e"){
+            string host;
+            int port;
+            host=argv[2];
+            port=stoi(argv[3]);
+            printf("ProxyPort: 注销登录中 %s %d...\n",host.c_str(),port);
+            logout_server(host,port);
+            /*
+            argv[1]//-e logout
+            argv[2]//yiban.glut.edu.cn    host
+            argv[3]//80                   port
+            */
         }
         printf("End\n");
         return 0;

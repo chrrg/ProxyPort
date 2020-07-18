@@ -1,1 +1,28 @@
 # depslib dependency file v1.0
+1581668753 source:d:\文档\codeblock\proxyport2\md5.cpp
+	"md5.h"
+	<string.h>
+
+1581668175 d:\文档\codeblock\proxyport2\md5.h
+	<string>
+	<fstream>
+
+1595035267 source:d:\文档\codeblock\proxyport2\main.cpp
+	<iostream>
+	<string>
+	<winsock2.h>
+	<stdio.h>
+	<windows.h>
+	<time.h>
+	<vector>
+	<regex>
+	<fstream>
+	"chconf.h"
+	"md5.h"
+
+1580804625 d:\文档\codeblock\proxyport2\chconf.h
+	<string>
+	<vector>
+	<string>
+	<fstream>
+
